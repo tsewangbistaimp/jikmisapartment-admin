@@ -1,0 +1,316 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// USER: a guest's self-service account from the legacy authenticated booking
+// flow — unrelated to staff, always the default for public /auth/register.
+// ADMIN: Owner/Admin — full access (staff, rooms, pricing, reports).
+// RECEPTION: Reception Staff — day-to-day booking/guest/payment operations,
+// cannot manage rooms, pricing, staff, or view financial reports. See
+// server/src/middleware/auth.js (requireAdmin vs. requireStaff) for exactly
+// which endpoints each role can reach.
+enum Role {
+  USER
+  ADMIN
+  RECEPTION
+}
+
+enum RoomType {
+  STUDIO
+  SINGLE
+  DOUBLE
+  FAMILY
+}
+
+// Hospitality-style booking lifecycle. Replaces the earlier simple
+// PENDING/APPROVED/REJECTED approval flow: CONFIRMED means staff verified
+// the advance payment, CHECKED_IN/CHECKED_OUT track the actual stay, and
+// CANCELLED is the terminal state for any booking that won't be honored.
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CHECKED_IN
+  CHECKED_OUT
+  CANCELLED
+}
+
+model User {
+  id           String    @id @default(cuid())
+  name         String
+  email        String    @unique
+  phone        String?
+  passwordHash String
+  role         Role      @default(USER)
+  // Staff deactivation switch (Owner "Manage staff" capability). A disabled
+  // account keeps its historical rows (bookings, paymentsRecorded) intact —
+  // deliberately not a hard delete — but requireAuth rejects its token on
+  // every subsequent request. See server/src/middleware/auth.js.
+  isActive     Boolean   @default(true)
+  bookings     Booking[]
+  // Payments this staff member has personally recorded via
+  // PATCH /bookings/:id/payment — see Payment.recordedByUserId.
+  paymentsRecorded Payment[]
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+// Deduplicated guest identity, separate from the account-based User model.
+// Most bookings (AI chat, admin-manual walk-ins, and the database-less
+// homepage form) come from people with no login — Guest lets the same
+// person's history (repeat stays, a stable phone/email) be tracked across
+// multiple bookings instead of only existing as flat text on each Booking
+// row. Booking keeps its own guestName/guestPhone/guestWhatsapp/guestEmail/
+// specialRequests fields exactly as before — those remain a point-in-time
+// SNAPSHOT of what was provided for that specific stay (never rewritten
+// retroactively), while Guest is the deduplicated, editable record. Booking
+// linking to Guest is optional and additive: nothing that already reads
+// booking.guestName/guestPhone/etc. needs to change.
+model Guest {
+  id             String           @id @default(cuid())
+  name           String
+  phone          String?
+  whatsapp       String?
+  email          String?
+  notes          String?
+  bookings       Booking[]
+  aiConversations AiConversation[]
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  @@index([phone])
+  @@index([email])
+}
+
+model Room {
+  id              String    @id @default(cuid())
+  title           String
+  type            RoomType
+  pricePerNight   Int
+  pricePerMonth   Int
+  description     String
+  facilities      String[]
+  rules           String[]
+  images          String[]
+  isAvailable     Boolean   @default(true)
+  maxGuests       Int       @default(2)
+  // Physical units of this room type (e.g. Jikmis Apartment has 2 Single
+  // Studio units and 2 Double Studio units sharing one Room record each).
+  // Availability/conflict checks must allow up to totalUnits overlapping
+  // bookings before rejecting a new one — see lib/bookingAssistant.ts.
+  totalUnits      Int       @default(1)
+  bookings        Booking[]
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+}
+
+// Where a booking originated. Kept as a plain string (not an enum) so new
+// channels can be added without a migration.
+model Booking {
+  id          String        @id @default(cuid())
+  // Optional: only set for bookings made by a logged-in user through the
+  // legacy authenticated flow. AI-receptionist / guest bookings leave this
+  // null and use the guest* fields below instead, so no fake account has to
+  // be created just to record a chat booking.
+  userId      String?
+  // Optional link to the deduplicated Guest record for this booking's
+  // contact (see the Guest model comment above). Additive and nullable —
+  // set by the booking-creation code going forward; historical rows (and
+  // any booking where guest matching didn't find/create a Guest) simply
+  // leave this null and keep working exactly as before via the guest*
+  // snapshot fields below.
+  guestId     String?
+  roomId      String
+  guestName   String?
+  guestPhone  String?
+  guestWhatsapp String?
+  guestEmail  String?
+  specialRequests String?
+  channel     String        @default("legacy_form")
+  checkIn     DateTime
+  checkOut    DateTime
+  totalPrice  Int
+  // Payment tracking: only amountPaid is stored — "remaining balance" is
+  // always derived as totalPrice - amountPaid rather than stored separately,
+  // so the two numbers can never drift out of sync.
+  amountPaid    Int           @default(0)
+  paymentMethod String?
+  status      BookingStatus @default(PENDING)
+  guestCount  Int           @default(1)
+  note        String?
+  // Communication automation tracking (lib/guestMessaging.js). Nullable
+  // timestamps, not booleans, so we also know WHEN each message went out.
+  // Their only purpose is idempotency — never send the same automated
+  // message twice for the same booking.
+  confirmationSentAt DateTime?
+  reminderSentAt     DateTime?
+  thankYouSentAt      DateTime?
+  user        User?         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  guestRecord Guest?        @relation(fields: [guestId], references: [id])
+  room        Room          @relation(fields: [roomId], references: [id], onDelete: Cascade)
+  // Itemized payment history (see the Payment model) — Booking.amountPaid
+  // above remains the fast-read running total; these are its audit trail.
+  payments      Payment[]
+  // One invoice per booking, auto-created when status first reaches
+  // CONFIRMED — see the Invoice model and
+  // server/src/controllers/bookingController.js updateBookingStatus.
+  invoice       Invoice?
+  // Log of every automated guest-communication attempt for this booking —
+  // see the Notification model. Distinct from the confirmationSentAt/
+  // reminderSentAt/thankYouSentAt timestamps above, which only record the
+  // most recent successful send of each type for idempotency, not a full
+  // history or failure log.
+  notifications Notification[]
+  // AI chat conversation(s) that led to or referenced this booking, if any
+  // — see the AiConversation model.
+  aiConversations AiConversation[]
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([roomId, checkIn, checkOut])
+  @@index([userId])
+  @@index([guestId])
+}
+
+// Itemized payment ledger — one row per payment staff record (e.g. a 50%
+// advance via eSewa, then the remaining balance via cash a few days later).
+// Booking.amountPaid remains the fast-read running total used by all
+// existing "remaining balance = totalPrice - amountPaid" logic across the
+// admin UI and API — this table adds an auditable history without changing
+// that contract. Whenever a Payment row is inserted, the calling code keeps
+// Booking.amountPaid in sync — see
+// server/src/controllers/bookingController.js updateBookingPayment.
+model Payment {
+  id        String   @id @default(cuid())
+  bookingId String
+  booking   Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  amount    Int
+  // cash, bank_transfer, esewa, khalti — plain string (not an enum) so new
+  // payment methods don't require a migration, matching Booking.channel's
+  // existing pattern.
+  method    String?
+  // advance, remaining, other — which stage of the 50/50 payment policy
+  // (05_Booking_Policies.md) this payment represents, set by staff when
+  // recording it via POST /bookings/:id/payments. Plain string, not an
+  // enum, matching every other classification field in this schema.
+  // Defaults to "other" so existing rows (and the older, still-supported
+  // PATCH /bookings/:id/payment absolute-correction path, which doesn't
+  // collect a type) remain valid without backfilling.
+  type      String   @default("other")
+  note      String?
+  // Which admin recorded this payment, if known — optional audit trail,
+  // not required (e.g. a future automated payment gateway integration
+  // wouldn't have one).
+  recordedByUserId String?
+  recordedByUser   User?   @relation(fields: [recordedByUserId], references: [id])
+  recordedAt DateTime @default(now())
+
+  @@index([bookingId])
+}
+
+// One invoice per booking. Auto-created the first time a booking's status
+// is moved to CONFIRMED (the point where staff have verified the advance
+// payment and the stay is considered secured) — see
+// server/src/controllers/bookingController.js updateBookingStatus. No tax
+// policy is documented anywhere in this project (see ai-knowledge-base),
+// so taxAmount defaults to 0 rather than guessing a rate — staff can adjust
+// it manually if a future tax requirement applies.
+model Invoice {
+  id            String   @id @default(cuid())
+  bookingId     String   @unique
+  booking       Booking  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  invoiceNumber String   @unique
+  subtotal      Int
+  taxAmount     Int      @default(0)
+  totalAmount   Int
+  // Random, unguessable lookup key for the public invoice page
+  // (app/invoice/[token]/page.tsx) and the "send invoice to guest" email
+  // link — deliberately NOT invoiceNumber, which is sequential
+  // (JA-<year>-<0001>) and would let anyone iterate it to view other
+  // guests' invoices. Generated once in application code
+  // (getOrCreateInvoice(), server/src/controllers/bookingController.js) the
+  // first time an invoice is created; nullable only so this column can be
+  // added without a backfill migration (see 13_Database_Summary.md) —
+  // every invoice created going forward always gets one.
+  accessToken   String?  @unique
+  issuedAt      DateTime @default(now())
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// Log of every automated guest-communication attempt (confirmation email,
+// pre-arrival reminder, post-checkout thank-you — see
+// lib/guestMessaging.js), regardless of which booking path triggered it or
+// whether it actually succeeded. This is deliberately separate from
+// Booking's confirmationSentAt/reminderSentAt/thankYouSentAt fields, which
+// only ever record the timestamp of the last successful send of each type
+// (for idempotency) — Notification gives staff a full, append-only history
+// including failures, useful for "why didn't this guest get an email"
+// support questions.
+model Notification {
+  id           String    @id @default(cuid())
+  bookingId    String?
+  booking      Booking?  @relation(fields: [bookingId], references: [id], onDelete: Cascade)
+  // booking_confirmation, precheckin_reminder, postcheckout_thankyou —
+  // plain string, not an enum, so new notification types don't require a
+  // migration.
+  type         String
+  // email, whatsapp_link — whatsapp_link records that a wa.me link was
+  // generated/embedded, not that a message was silently pushed (see
+  // lib/guestMessaging.js's WhatsApp limitation note — there is no
+  // WhatsApp Business API in this project).
+  channel      String
+  recipient    String?
+  // sent, failed, skipped_not_configured, skipped_no_recipient — mirrors
+  // the {sent, reason} shapes already returned by lib/mailer.js and
+  // lib/guestMessaging.js, just persisted instead of only logged to console.
+  status       String
+  errorMessage String?
+  sentAt       DateTime  @default(now())
+
+  @@index([bookingId])
+  @@index([type])
+}
+
+// Persists AI receptionist chat transcripts. The chat API itself remains
+// stateless per-request (see app/api/chat/route.ts) — the client carries a
+// conversationId the same way it already carries bookingState (see
+// components/ApartmentChatbot.tsx), and the server appends each turn here.
+// Useful for reviewing AI answers, spotting knowledge base gaps, and
+// correlating a conversation with the booking it produced, if any.
+model AiConversation {
+  id            String      @id @default(cuid())
+  // "website" (the live chat widget) today; a plain string, not an enum, so
+  // a future channel (e.g. a WhatsApp-integrated AI chat) doesn't require a
+  // migration — matches Booking.channel's existing pattern.
+  channel       String      @default("website")
+  guestId       String?
+  guest         Guest?      @relation(fields: [guestId], references: [id])
+  bookingId     String?
+  booking       Booking?    @relation(fields: [bookingId], references: [id])
+  startedAt     DateTime    @default(now())
+  lastMessageAt DateTime    @default(now())
+  messages      AiMessage[]
+
+  @@index([guestId])
+  @@index([bookingId])
+}
+
+model AiMessage {
+  id             String         @id @default(cuid())
+  conversationId String
+  conversation   AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  // "user" or "assistant".
+  role           String
+  content        String
+  // jikmis_source_of_truth, local_fallback, booking_assistant, openai —
+  // mirrors app/api/chat/route.ts's response "source" field, recorded here
+  // so a transcript shows which reply engine answered each turn.
+  source         String?
+  createdAt      DateTime @default(now())
+
+  @@index([conversationId])
+}
