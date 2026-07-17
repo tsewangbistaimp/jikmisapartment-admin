@@ -9,6 +9,7 @@
     "prebuild": "npm run knowledge:build",
     "dev": "next dev",
     "dev:api": "node server/src/index.js",
+    "start:api": "node server/src/index.js",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
     "db:seed": "node prisma/seed.js",
