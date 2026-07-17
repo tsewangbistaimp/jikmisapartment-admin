@@ -14,11 +14,12 @@ const prisma = new PrismaClient({ adapter });
 // ("Boudha View Studio" etc.) left over from the original portfolio
 // template — those never matched the real property and have been replaced.
 async function main() {
-  // The seeded Owner/Admin password is configurable via SEED_ADMIN_PASSWORD
-  // so it's never hardcoded in source control for a real deployment. The
-  // "admin12345" fallback only exists for local/dev seeding convenience —
-  // change it immediately after first login via PATCH /auth/password, or
-  // set SEED_ADMIN_PASSWORD before seeding a real environment.
+  // The seeded Owner/Admin email/name/password are configurable via env vars
+  // so a real deployment's admin identity is never hardcoded in source
+  // control. The fallbacks below only exist for local/dev seeding
+  // convenience — change the password immediately after first login via
+  // PATCH /auth/password, or set SEED_ADMIN_PASSWORD before seeding a real
+  // environment.
   if (!process.env.SEED_ADMIN_PASSWORD) {
     console.warn(
       "[seed] SEED_ADMIN_PASSWORD is not set — using the insecure default dev password 'admin12345'. " +
@@ -26,13 +27,15 @@ async function main() {
     );
   }
   const passwordHash = await bcrypt.hash(process.env.SEED_ADMIN_PASSWORD || "admin12345", 12);
+  const adminEmail = process.env.SEED_ADMIN_EMAIL || "admin@jikmis.com";
+  const adminName = process.env.SEED_ADMIN_NAME || "Jikmis Admin";
 
   await prisma.user.upsert({
-    where: { email: "admin@jikmis.com" },
-    update: {},
+    where: { email: adminEmail },
+    update: { passwordHash, name: adminName, role: Role.ADMIN, isActive: true },
     create: {
-      name: "Jikmis Admin",
-      email: "admin@jikmis.com",
+      name: adminName,
+      email: adminEmail,
       phone: "+9779708538395",
       passwordHash,
       role: Role.ADMIN
