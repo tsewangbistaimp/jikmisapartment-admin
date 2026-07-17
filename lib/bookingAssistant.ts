@@ -18,6 +18,7 @@
  * — a booking made through the homepage form shows up in /admin and
  * /admin/calendar immediately, the same Postgres row either page reads.
  */
+import type { BookingStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { FORMSPREE_ENDPOINT, INQUIRY_EMAIL } from "@/lib/site";
 // Plain JS module (see lib/guestMessaging.js for why it isn't TypeScript) —
@@ -253,7 +254,7 @@ function formatCurrency(amount: number): string {
 // Statuses that still "occupy" a room for conflict-checking purposes.
 // CHECKED_OUT and CANCELLED bookings free up the room. Kept in sync with
 // server/src/services/bookingService.js's OCCUPYING_STATUSES.
-const OCCUPYING_STATUSES = ["PENDING", "CONFIRMED", "CHECKED_IN"];
+const OCCUPYING_STATUSES: BookingStatus[] = ["PENDING", "CONFIRMED", "CHECKED_IN"];
 
 /**
  * Counts overlapping occupying bookings for a room against its totalUnits.
