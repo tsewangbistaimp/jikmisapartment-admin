@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import type { BookingStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 // Plain CommonJS module shared with the legacy Express booking path — see
 // lib/guestMessaging.js for why it isn't TypeScript.
@@ -37,7 +38,7 @@ import { sendPreCheckinReminder, sendPostCheckoutThankYou } from "@/lib/guestMes
  * feature, not silently downgrade it to "no auth."
  */
 
-const OCCUPYING_STATUSES = ["PENDING", "CONFIRMED", "CHECKED_IN"] as const;
+const OCCUPYING_STATUSES: BookingStatus[] = ["PENDING", "CONFIRMED", "CHECKED_IN"];
 
 function startOfDay(date: Date): Date {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate());
